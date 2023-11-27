@@ -1,0 +1,274 @@
+---
+title: "LTMLE for survtmle"
+author: "Nolan Gunter"
+date: "11/14/2023"
+output: pdf_document
+---
+
+This document is for replicating Yi's code for our survival project, with the bladder1 dataset.
+
+#Load Bladder dataset
+
+```{r}
+library(survival)
+library(ltmle)
+library(ggplot2)
+library(mvtnorm)
+library(dplyr)
+library(purrr)
+library(rlang)
+
+data <- bladder1
+
+data <- data %>% 
+  select(-c(rtumor,rsize,enum,recur))
+
+#next change status = 3 to 0
+#assume death is type of censoring
+# for now change status = 2 to 0 as well...
+data$status[data$status == 3 | data$status == 2] <- 0
+
+#redefine treatment to numeric
+#0 = placebo, 1 = pyridoxine, 2 = thiotepa
+data$treatment <- as.numeric(data$treatment) - 1
+
+#for now, only use the first recurrence for a patient
+data <- data %>% filter(start == 0) %>%
+  mutate(time = stop) %>%
+  select(-c(start,stop,id))
+
+full_data <- data
+
+#make 3 different datasets for 3 levels of comparison
+data01 <- data %>% filter(treatment %in% c(0,1))
+data02 <- data %>% filter(treatment %in% c(0,2))
+data12 <- data %>% filter(treatment %in% c(1,2))
+
+#data <- data01
+#data <- data02
+#data$treatment[data$treatment == 2] <- 1
+data <- data12
+data$treatment <- data$treatment - 1
+
+#time survival time in month, possibly censored.
+#status 0 censored, 1 recurrence, 2 death from bladder disease, 3 dead from other causes
+```
+
+Some facts about using ltmle:
+
+The estimates returned by ltmle are of a treatment specific mean, E[Ya], the mean of the final treatment node, where all treatment nodes, A, are set to a  and all censoring nodes C are set to 1 (uncensored).
+
+data should be a data frame where the order of the columns corresponds to the time-ordering of the model.
+
+*In censoring columns (Cnodes): factor with two levels: "censored" and "uncensored". Thehelper function BinaryToCensoring can be used to create these factors
+
+*In treatment columns (Anodes): 1 = treated, 0 = untreated (must be binary)
+
+*In event columns (Ynodes): If survivalOutcome is TRUE, then Y nodes are treated as indicators of a one-time event
+
+*time-dependent covariate columns (Lnodes): can be any numeric data
+
+*Data in Cnodes, Anodes, Lnodes and Ynodes are not used after (to the right of) censoring (or an event when survivalOutcome==TRUE) and may be coded as NA or any other value.
+
+*Columns in data that are before (to the left of) the first of Cnodes or Anodes are treated as baseline variables, even if they are specified as Lnodes.
+
+*After the first of Cnodes, Anodes, Ynodes, or Lnodes, every column must be in one of Cnodes, Anodes, Ynodes, or Lnodes.
+
+*If survivalOutcome is TRUE, all Y values are indicators of an event (e.g. death) at or before the current time, where 1 = event and 0 = no event. The events in Ynodes must be of the form where once Y jumps to 1, Y remains 1 at subsequent nodes.
+
+#Prepare our data for ltmle usage
+
+#Time scale
+```{r}
+#ltmle only handle discrete time
+#Before we continue our discretization, let's visualize the time collected in days.
+hist(data$time)
+```
+
+#Now, let's create a dataset that keeps track of the time-dependent status in each row. 
+
+```{r}
+#For each row in my original data, I know the event happen at the recorded time, no matter it is a censoring event or a failure event. This implies that before that time, the Cnodes are 0 (no censroing) and the Ynodes is 0 (not failed yet).
+
+#At each time point, the Cnode comes before Ynode. Since If not censored at that time, we can observe whether failure happened at that time or not.
+
+#Note that the time 0 treatment is already after the baseline nodes, so don't need to move it to the position after the baseline columns.
+
+max_time <- max(data$time)
+
+c_column_name <- paste0("C_", 0:max(data$time))
+y_column_name <- paste0("Y_", 0:max(data$time))
+
+for(i in 0:max(data$time)){
+  data <- data %>% 
+    mutate(!!c_column_name[i+1] := ifelse(time==i & status==1,1,ifelse(time<i,ifelse(status==0,0,NA),0)),
+           !!y_column_name[i+1] := ifelse(time<=i & status==0,1,ifelse(time<=i,NA,0)))
+  
+}
+
+data <- data%>%select(-time,-status)
+
+#We will use the BinaryToCensoring function to help us changing the Cnodes to factor object to be used in ltmle
+for(j in 0:max_time){
+  data[,c_column_name[j+1]] <- BinaryToCensoring(is.censored=data[,c_column_name[j+1]])
+}
+```
+
+#Fit ltmle
+
+
+
+```{r}
+#Now, we need to tell the ltmle what are the A nodes, L nodes, C nodes and Y nodes
+time <- 10
+Anodes <- c("treatment") #can give by column name
+Lnodes<- c(2,3) #can give by column number
+Cnodes<- c_column_name[1:(time+1)]
+Ynodes<- y_column_name[1:(time+1)]
+```
+
+#Set up a superLearner library to use
+```{r}
+library(SuperLearner)
+library(arm) #the SL.bayesglm needs this package
+#You can try to put more complicated superLearner libraries
+SL.library <- c("SL.glm", "SL.bayesglm", "SL.mean")
+
+tmp_dat <- data %>% select(treatment,number,size,Cnodes,Ynodes)
+  
+results.ltmle <- ltmle(
+  data = tmp_dat,
+  survivalOutcome = TRUE,
+  Anodes = Anodes, Lnodes = Lnodes, Cnodes = Cnodes,  Ynodes = Ynodes,
+  abar = 1, #to specify the intervention of interest to 1
+  variance.method = "ic",
+  SL.library=SL.library
+)
+
+#This gives you the tmle estimate for the counterfactual P(T1<=time) in a world where treatment is set to 1 and there is no censoring.
+#Since this gives you the  E(Y_5) under no censoring and intervention 1. Due to Y_time=1 or 0, this is the same as P(Y_time=1), but Y_time=1 means T<=time.
+results.ltmle$estimates[1]
+#This gives you a vector of Influence curve evaluation for P(T1<=time) at each observation O_i, so that you can use it for simultaneous interval construction.
+results.ltmle$IC$tmle
+
+### THIS IS WHAT I USED FOR INITIAL LTMLE RESULTS
+
+#Now if one is interested in the P(T1<=TIME)-P(T0<=TIME)
+#tmle estimate for P(T1<=TIME)-P(T0<=TIME)
+results.ltmle$estimates[1]-results.ltmle_0$estimates[1]
+
+#IC(O_i) for P(T1<=time)-P(T0<=time)
+results.ltmle$IC$tmle -results.ltmle_0$IC$tmle 
+
+ci <- c(results.ltmle$estimates[1]-results.ltmle_0$estimates[1] - 1.96*(sd(results.ltmle$IC$tmle -results.ltmle_0$IC$tmle))/sqrt(nrow(data_lt)),
+        results.ltmle$estimates[1]-results.ltmle_0$estimates[1] + 1.96*(sd(results.ltmle$IC$tmle -results.ltmle_0$IC$tmle))/sqrt(nrow(data_lt)))
+
+###
+#Now if one is interested in the 1-P(T1>time)
+#tmle estimate for 1-P(T1>time)
+1-results.ltmle$estimates[1]
+#IC(O_i) for 1-P(T1>time)
+-results.ltmle$IC$tmle
+```
+
+#Now one has everything for P(T1>3) and P(T1>5), then one can go over the Simultaneous_CI.Rmd files row 141-182 to construct simultaneous CI.
+
+```{r}
+### replicating Yi's code for our data
+failure1_data <- full_data
+Ttilde <- failure1_data$time
+Delta <- failure1_data$status == 1
+n <- length(Ttilde)
+
+# do a KM fit
+## EDIT: Yi regressed against 1 instead of treatment
+#km <- survfit(Surv(Ttilde, Delta, type = "right") ~ failure1_data$treatment, type = "kaplan-meier", 
+#              conf.int = .95)
+
+#this part will estimate overall survival
+km <- survfit(Surv(Ttilde, Delta, type = "right") ~ 1, type = "kaplan-meier", 
+              conf.int = .95)
+
+# make step functions
+km_step <- stepfun(km$time, c(1, km$surv))
+km_lower <- stepfun(km$time, c(1, km$lower))
+km_upper <- stepfun(km$time, c(1, km$upper))
+
+range <- seq(0:60)
+
+km_data <- data.frame(time = range, 
+                      lower = km_lower(range),
+                      KM = km_step(range),
+                      upper = km_upper(range)
+                      )
+
+km_data_long <- data.frame(time = c(range,range,range),
+                           estimate = c(km_data$lower,km_data$KM,km_data$upper),
+                           label = c(rep("lower",length(range)),
+                                     rep("KM",length(range)),
+                                     rep("upper",length(range))))
+
+
+ggplot(data = km_data_long, aes(x = time, y = estimate, color = label)) + 
+  geom_point() + geom_line() + labs(y = "Estimated Probability", x = "Time (months)") + theme_minimal()
+```
+
+```{r}
+#STEP1 start
+# order observed data according to increasing order Ttilde
+T_ord <- Ttilde[order(Ttilde)]
+D_ord <- Delta[order(Ttilde)]
+
+# all known death times in order
+T_death <- T_ord[D_ord]
+    
+# compute the hazard (lambda) at all known death times
+nrisk <- sapply(T_death, function(x) sum(Ttilde >= x))
+lambda <- 1/nrisk
+
+# compute the prob of surviving up to or past each death time
+Pbar <- sapply(T_death, function(x) mean(Ttilde >= x))
+    
+calculate_IC <- function(Ttilde, Delta, time, n) {
+    sum((-(T_death <= time)*km_step(time)/(1 - lambda))*
+          lambda^2*(1 - lambda)^2/((1 - lambda)^2/n + lambda^2*Pbar)*
+          ((Ttilde == T_death & Delta == 1)/lambda - (Ttilde > T_death)/(1 - lambda)),na.rm=T)
+}
+
+# compute the IC matrix for times 40, 50, 60 where each column is an IC
+times <- c(12,24,36)
+IC_matrix <- sapply(times, function(t) {
+    unlist(lapply(1:n, function(i) calculate_IC(Ttilde[i], Delta[i], t, n)))
+})
+#STEP1 end
+    
+#STEP2 start
+# compute the correlation of the IC matrix
+Sigma <- cor(IC_matrix)
+# randomly draw from a multivariate Normal(0,Sigma) distribution
+mean <- rep(0, length(times))
+z <- rmvnorm(1e6, mean, Sigma)
+    
+# identify row-wise maximum of the absolute value of each MVN value in z
+z_abs <- apply(z, 1, function(x) max(abs(x))) 
+# identify 95th quantile of z_abs, which is the se to use for simultaneous CI
+z_95 <- quantile(z_abs, .95)
+# note how the se_simultaneous is larger when demanding simultaneous coverage
+# of the truth, and it directly follows that simultaneous CIs are wider.
+    
+# check if all of the simultaneous CI's covered the truth
+sd_IC1 <- sd(IC_matrix[,1])/sqrt(n)
+sd_IC2 <- sd(IC_matrix[,2])/sqrt(n)
+sd_IC3 <- sd(IC_matrix[,3])/sqrt(n)
+    
+ci1 <- c(km_step(times[1]) - z_95*sd_IC1, km_step(times[1]) + z_95*sd_IC1)
+    
+ci2 <- c(km_step(times[2]) - z_95*sd_IC2, km_step(times[2]) + z_95*sd_IC2)
+    
+ci3 <- c(km_step(times[3]) - z_95*sd_IC3, km_step(times[3]) + z_95*sd_IC3)
+    
+ci1
+ci2
+ci3
+```
+
