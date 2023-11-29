@@ -6,9 +6,6 @@ library(imputeMissings)
 library(tidyverse)
 library(ltmle)
 
-
-
-
 data <- bladder1
 tau=24
 data <- data %>% filter(enum == 1) %>%
