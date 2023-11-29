@@ -38,17 +38,27 @@ data <- data %>% filter(start == 0) %>%
   select(-c(start,stop,id))
 
 full_data <- data
+```
 
+Use this block of code ONLY if you are using the simulated data
+
+```{r}
+data <- sim
+```
+
+```{r}
 #make 3 different datasets for 3 levels of comparison
 data01 <- data %>% filter(treatment %in% c(0,1))
 data02 <- data %>% filter(treatment %in% c(0,2))
 data12 <- data %>% filter(treatment %in% c(1,2))
 
 #data <- data01
-#data <- data02
-#data$treatment[data$treatment == 2] <- 1
-data <- data12
-data$treatment <- data$treatment - 1
+
+data <- data02
+data$treatment[data$treatment == 2] <- 1
+
+#data <- data12
+#data$treatment <- data$treatment - 1
 
 #time survival time in month, possibly censored.
 #status 0 censored, 1 recurrence, 2 death from bladder disease, 3 dead from other causes
@@ -106,7 +116,7 @@ for(i in 0:max(data$time)){
   
 }
 
-data <- data%>%select(-time,-status)
+data <- data %>% dplyr::select(-time,-status)
 
 #We will use the BinaryToCensoring function to help us changing the Cnodes to factor object to be used in ltmle
 for(j in 0:max_time){
@@ -116,11 +126,9 @@ for(j in 0:max_time){
 
 #Fit ltmle
 
-
-
 ```{r}
 #Now, we need to tell the ltmle what are the A nodes, L nodes, C nodes and Y nodes
-time <- 10
+time <- 24
 Anodes <- c("treatment") #can give by column name
 Lnodes<- c(2,3) #can give by column number
 Cnodes<- c_column_name[1:(time+1)]
@@ -134,7 +142,7 @@ library(arm) #the SL.bayesglm needs this package
 #You can try to put more complicated superLearner libraries
 SL.library <- c("SL.glm", "SL.bayesglm", "SL.mean")
 
-tmp_dat <- data %>% select(treatment,number,size,Cnodes,Ynodes)
+tmp_dat <- data %>% dplyr::select(treatment,number,size,Cnodes,Ynodes)
   
 results.ltmle <- ltmle(
   data = tmp_dat,
@@ -149,8 +157,22 @@ results.ltmle <- ltmle(
 #Since this gives you the  E(Y_5) under no censoring and intervention 1. Due to Y_time=1 or 0, this is the same as P(Y_time=1), but Y_time=1 means T<=time.
 results.ltmle$estimates[1]
 #This gives you a vector of Influence curve evaluation for P(T1<=time) at each observation O_i, so that you can use it for simultaneous interval construction.
-results.ltmle$IC$tmle
 
+#results.ltmle$IC$tmle
+
+c(results.ltmle$estimates[1] - 1.96*(sd(results.ltmle$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle$estimates[1] + 1.96*(sd(results.ltmle$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+###
+#Now if one is interested in the 1-P(T1>time)
+#tmle estimate for 1-P(T1>time)
+1-results.ltmle$estimates[1]
+#IC(O_i) for 1-P(T1>time)
+
+#-results.ltmle$IC$tmle
+```
+
+```{r}
 ### THIS IS WHAT I USED FOR INITIAL LTMLE RESULTS
 
 #Now if one is interested in the P(T1<=TIME)-P(T0<=TIME)
@@ -162,20 +184,22 @@ results.ltmle$IC$tmle -results.ltmle_0$IC$tmle
 
 ci <- c(results.ltmle$estimates[1]-results.ltmle_0$estimates[1] - 1.96*(sd(results.ltmle$IC$tmle -results.ltmle_0$IC$tmle))/sqrt(nrow(data_lt)),
         results.ltmle$estimates[1]-results.ltmle_0$estimates[1] + 1.96*(sd(results.ltmle$IC$tmle -results.ltmle_0$IC$tmle))/sqrt(nrow(data_lt)))
-
-###
-#Now if one is interested in the 1-P(T1>time)
-#tmle estimate for 1-P(T1>time)
-1-results.ltmle$estimates[1]
-#IC(O_i) for 1-P(T1>time)
--results.ltmle$IC$tmle
 ```
 
-#Now one has everything for P(T1>3) and P(T1>5), then one can go over the Simultaneous_CI.Rmd files row 141-182 to construct simultaneous CI.
+
+#Now one has everything for mutliple time points, then one can go over the Simultaneous_CI.Rmd files row 141-182 to construct simultaneous CI.
 
 ```{r}
 ### replicating Yi's code for our data
+
+###Use this chunk if you are using simulated data
+failure1_data <- sim
+
+###Use this chunk if you are using real data
 failure1_data <- full_data
+
+
+
 Ttilde <- failure1_data$time
 Delta <- failure1_data$status == 1
 n <- length(Ttilde)
@@ -194,7 +218,7 @@ km_step <- stepfun(km$time, c(1, km$surv))
 km_lower <- stepfun(km$time, c(1, km$lower))
 km_upper <- stepfun(km$time, c(1, km$upper))
 
-range <- seq(0:60)
+range <- seq(0:max(failure1_data$time))
 
 km_data <- data.frame(time = range, 
                       lower = km_lower(range),
@@ -212,6 +236,13 @@ km_data_long <- data.frame(time = c(range,range,range),
 ggplot(data = km_data_long, aes(x = time, y = estimate, color = label)) + 
   geom_point() + geom_line() + labs(y = "Estimated Probability", x = "Time (months)") + theme_minimal()
 ```
+
+```{r}
+kmcurve=survfit(Surv(failure1_data$time,failure1_data$status)~failure1_data$treatment)
+survdiff(Surv(failure1_data$time,failure1_data$status)~failure1_data$treatment)
+survminer::ggsurvplot(kmcurve,data=failure1_data)
+```
+
 
 ```{r}
 #STEP1 start
