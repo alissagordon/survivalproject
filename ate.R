@@ -10,8 +10,8 @@ library(ltmle)
 
 
 data <- bladder1
-
-data <- data %>% filter(enum == 2) %>%
+tau=24
+data <- data %>% filter(enum == 1) %>%
   dplyr::select(-c(start,rtumor,rsize,enum,recur))
 
 #next change status = 3 to 0
@@ -19,10 +19,10 @@ data <- data %>% filter(enum == 2) %>%
 data$status[data$status == 3] <- 0
 
 #outcome for if they had recurrence in first 2 years (tau) or not
-data$Y <- ifelse(data$stop <= 24, 1, 0)
+data$Y <- ifelse(data$stop <= tau & data$status==1, 1, 0)
 
 #Censoring variable: I(C>tau)
-data$censoring<-ifelse(data$Y==1 & data$status==0, 0,1)
+data$censoring<-ifelse(data$stop>tau & data$status==0, 0,1)
 #redefine treatment to numeric
 #0 = placebo, 1 = pyridoxine, 2 = thiotepa
 data$treatment <- as.numeric(data$treatment) - 1
