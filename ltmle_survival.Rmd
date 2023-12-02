@@ -198,8 +198,6 @@ failure1_data <- sim
 ###Use this chunk if you are using real data
 failure1_data <- full_data
 
-
-
 Ttilde <- failure1_data$time
 Delta <- failure1_data$status == 1
 n <- length(Ttilde)

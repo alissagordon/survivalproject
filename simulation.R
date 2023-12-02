@@ -18,7 +18,7 @@ gen_firstrecur <- function(n){
   A <- rdunif(n,0,2)
   
   #Generate outcome based on baselines and treatment
-  lambdas <- 12 - 0.5*W[,1] + -1*W[,2] + 5*A
+  lambdas <- 12 + 0.5*W[,1] + 1*W[,2] - 3*A
   
   lambdas[lambdas <= 0] <- 1e-4
   
@@ -39,4 +39,22 @@ gen_firstrecur <- function(n){
 sim <- gen_firstrecur(n)
 sim
 
-write.csv(sim, "~/Desktop/survivalproject/sim_data_1e4.csv")
+#write.csv(sim, "~/Desktop/survivalproject/sim_data_1e4.csv")
+
+sim %>% group_by(treatment) %>% summarize(mean = mean(time))
+
+library(ggplot2)
+
+ggplot(data = sim, aes(x = time)) + geom_histogram() + 
+  theme_minimal() + labs(x = "Time to 1st Recurrence", y = "Frequency",
+                         title = "Simulated Data")
+
+data <- bladder1
+tau=24
+data <- data %>% filter(enum == 1) %>%
+  dplyr::select(-c(start,rtumor,rsize,enum,recur))
+
+ggplot(data = data, aes(x = stop)) + geom_histogram(binwidth = 3) + 
+  theme_minimal() + labs(x = "Time to 1st Recurrence", y = "Frequency",
+                         title = "Real Data")
+
