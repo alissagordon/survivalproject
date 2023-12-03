@@ -1,0 +1,121 @@
+
+```{r}
+library(MASS)
+library(ltmle)
+library(survival)
+data <- bladder1
+
+data <- data %>% 
+  dplyr::select(-c(rtumor,rsize,enum,recur))
+
+#redefine treatment to numeric
+#0 = placebo, 1 = pyridoxine, 2 = thiotepa
+data$treatment <- as.numeric(data$treatment) - 1
+
+#for now, only use the first recurrence for a patient
+data <- data %>% filter(start == 0) %>%
+  mutate(time = stop) %>%
+  dplyr::select(-c(start,stop,id))
+bladder_original<-data
+
+```
+
+
+#Inference will be based on bootstrap
+```{r}
+Boostrap<-function(bladder_original){
+        n<-dim(bladder_original)[1]
+        bladder<-bladder_original[ sample(1:n, n, replace=TRUE),]
+        max_time<-max(bladder$time)
+        
+        library(dplyr)
+        data$status[data$status == 3 | data$status == 2] <- 0
+        
+        data$id<-c(1:n)
+        
+        failure_repeated_data<-NULL
+        
+        for(i in 1:n){
+        #if it is a censoring at time t, then we know the failure hasn't happened before time t
+        if (data$time[i]>1 & data$status[i]==0){
+          time_col<-c(1:(data$time[i]-1))
+          count_col<-rep(0,data$time[i]-1)
+          baseline_part<-data[i,c(1,2,3,6)] %>% slice(rep(1:n(), each = data$time[i]-1))
+          failure_data_i<-cbind(time_col,count_col,baseline_part)
+          failure_repeated_data <-rbind(failure_repeated_data,failure_data_i)               
+        }
+        #if it is a failure at time t, then we know the failure hasn't happened before time t and happen at time t
+        if (data$status[i]==1){
+          time_col<-c(1:(data$time[i]))
+          count_col<-c(rep(0,data$time[i]-1),1)
+          baseline_part<-data[i,c(1,2,3,6)] %>% slice(rep(1:n(), each = data$time[i]))
+          failure_data_i<-cbind(time_col,count_col,baseline_part)
+          failure_repeated_data <-rbind(failure_repeated_data,failure_data_i)  
+        }
+        }
+        library(SuperLearner)
+        sl = SuperLearner(Y = failure_repeated_data$count_col, X =failure_repeated_data[,c(1,3,4,5)] , family = binomial(),
+  SL.library = c("SL.mean", "SL.glmnet", "SL.ranger"))
+
+        sim_one<-function(seed){
+          failed<-0
+          baseline_part<-data[ sample(1:n, 1, replace=TRUE),c(2,3)]
+          baseline_treatment_part<-cbind(baseline_part,treatment=1)
+          time_fail<-1
+          while(failed==0 &time_fail<=max_time){
+            xinput<-cbind(time_col=time_fail,baseline_treatment_part)
+            # onlySL is set to TRUE so we don't fit algorithms that had weight = 0, saving computation.
+            pred = predict(sl, xinput, onlySL = TRUE)
+            failed<-rbinom(1,1,as.numeric(pred[1]))
+            if(failed==0){
+              time_fail<-time_fail+1
+            }
+          }
+          return(time_fail)
+        }
+        
+        library(doParallel)
+        sim_n<-200
+        num_cores <- detectCores()-2
+        registerDoParallel(cores = num_cores)
+        
+        sim_result<-foreach(i = 1:sim_n, .combine = rbind) %dopar% {
+                        return(sim_one(i))
+        }
+        
+        result_vector<-as.numeric(sim_result)
+        
+        #P(T1>3),P(T1>5)
+        return(c(mean(result_vector>12),mean(result_vector>24)))
+}
+
+Boostrap(bladder_original)
+
+```
+
+```{r}
+library(doParallel)
+B<-5
+num_cores <- detectCores()-2
+registerDoParallel(cores = num_cores)
+
+sample_dist_result<-foreach(i = 1:B, .combine = rbind) %dopar% {
+                return(Boostrap(bladder_original))
+}
+
+#Column 1 is estimate of P(T1>3) under boostrap samples. so histogram of it gives the sampling distribution of the proposed estimator of P(T1>3)
+hist(as.numeric(sample_dist_result[,1]))
+#Column 2 is estimate of P(T1>5) under boostrap samples. so histogram of it gives the sampling distribution of the proposed estimator of P(T1>5)
+hist(as.numeric(sample_dist_result[,2]))
+
+#95% CI of P(T1>3) based on boostrap
+quantile(as.numeric(sample_dist_result[,1]),c(0.025,0.975))
+#95% CI of P(T1>5) based on boostrap
+quantile(as.numeric(sample_dist_result[,2]),c(0.025,0.975))
+```
+
+
+
+
+
+

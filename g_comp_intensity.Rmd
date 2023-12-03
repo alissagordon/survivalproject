@@ -1,0 +1,151 @@
+
+#In this file, we will illustrate how to get a good fit of the conditional intensities (if there is time dependent covariates)/hazards (if no time dependent covariates) and then use the g computation formula to get a plug in estimate. 
+#We will illustrate this in discrete time. The continuous time will be briefly mentioned if time is allowed.
+
+#Load a dataset for illustration
+```{r}
+library(MASS)
+library(ltmle)
+library(survival)
+
+data <- bladder1
+
+data <- data %>% 
+  dplyr::select(-c(rtumor,rsize,enum,recur))
+
+#redefine treatment to numeric
+#0 = placebo, 1 = pyridoxine, 2 = thiotepa
+data$treatment <- as.numeric(data$treatment) - 1
+
+#for now, only use the first recurrence for a patient
+data <- data %>% filter(start == 0) %>%
+  mutate(time = stop) %>%
+  dplyr::select(-c(start,stop,id))
+
+full_data <- data
+
+#make 3 different datasets for 3 levels of comparison
+data01 <- data %>% filter(treatment %in% c(0,1))
+data02 <- data %>% filter(treatment %in% c(0,2))
+data12 <- data %>% filter(treatment %in% c(1,2))
+
+data0 <- data %>% filter(treatment == 0)
+
+```
+
+#Prepare our data in a discrete time scale and one censoring
+
+#Time scale
+```{r}
+#ltmle only handle discrete time. Here, time is in days, maybe too detailed and thus in order to pull across observations, we need a less detailed version, say years
+
+#Before we continue our discretization, let's visualize the time collected in days.
+
+# hist(data$time)
+# data$time<-as.integer(data$time/3)+1
+hist(data$time)
+max_time<-max(data$time)
+```
+
+#Censoring
+
+```{r}
+library(dplyr)
+#next change status = 3 to 0
+#assume death is type of censoring
+# for now change status = 2 to 0 as well... 0 censored, 1 recurrence
+data$status[data$status == 3 | data$status == 2] <- 0
+```
+
+#Add a id column and created a repeated data format.
+```{r}
+n<-dim(data)[1]
+data$id<-c(1:n)
+```
+
+#Suppose Censoring happen before failure at any time point
+#Info for failure across time
+```{r}
+
+failure_repeated_data<-NULL
+
+for(i in 1:n){
+  #if it is a censoring at time t, then we know the failure hasn't happened before time t
+  if (data$time[i]>1 & data$status[i]==0){
+    time_col<-c(1:(data$time[i]-1))
+    count_col<-rep(0,data$time[i]-1)
+    baseline_part<-data[i,c(1,2,3,6)] %>% slice(rep(1:n(), each = data$time[i]-1))
+    failure_data_i<-cbind(time_col,count_col,baseline_part)
+    failure_repeated_data <-rbind(failure_repeated_data,failure_data_i)               
+  }
+  #if it is a failure at time t, then we know the failure hasn't happened before time t and happen at time t
+  if (data$status[i]==1){
+    time_col<-c(1:(data$time[i]))
+    count_col<-c(rep(0,data$time[i]-1),1)
+    baseline_part<-data[i,c(1,2,3,6)] %>% slice(rep(1:n(), each = data$time[i]))
+    failure_data_i<-cbind(time_col,count_col,baseline_part)
+    failure_repeated_data <-rbind(failure_repeated_data,failure_data_i)  
+  }
+}
+```
+
+#Fit hazard/intensity model of interest using super learner
+```{r}
+library(SuperLearner)
+sl = SuperLearner(Y = failure_repeated_data$count_col, X =failure_repeated_data[,c(1,3,4,5)] , family = binomial(),
+  SL.library = c("SL.mean", "SL.glmnet", "SL.ranger"))
+sl
+```
+#Get the g computation evalutation trhough monte carlo simulation (suppose interested in A=1 counterfactual world)
+```{r}
+sim_one<-function(seed){
+  failed<-0
+  baseline_part<-data[ sample(1:n, 1, replace=TRUE),c(2,3)]
+  baseline_treatment_part<-cbind(baseline_part,treatment=1)
+  time_fail<-1
+  while(failed==0 &time_fail<=max_time){
+    xinput<-cbind(time_col=time_fail,baseline_treatment_part)
+    # onlySL is set to TRUE so we don't fit algorithms that had weight = 0, saving computation.
+    pred = predict(sl, xinput, onlySL = TRUE)
+    failed<-rbinom(1,1,as.numeric(pred[1]))
+    if(failed==0){
+      time_fail<-time_fail+1
+    }
+  }
+  return(time_fail)
+}
+
+```
+
+#In our example, max_time=16, so 17 means not failed at time 16
+```{r}
+library(doParallel)
+sim_n<-200
+num_cores <- detectCores()-2
+registerDoParallel(cores = num_cores)
+
+sim_result<-foreach(i = 1:sim_n, .combine = rbind) %dopar% {
+                return(sim_one(i))
+}
+
+result_vector<-as.numeric(sim_result)
+```
+
+#If interested in P(T>3), P(T>5), P(T>16)
+```{r}
+#P(T>6)
+mean(result_vector>6)
+
+#P(T>12)
+mean(result_vector>12)
+
+#P(T>24)
+mean(result_vector>24)
+```
+
+
+
+#Inference will be based on bootstrap, illustrated in another file
+
+
+
