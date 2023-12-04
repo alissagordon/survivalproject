@@ -1,0 +1,378 @@
+---
+title: "LTMLE for survtmle"
+author: "Nolan Gunter"
+date: "11/14/2023"
+output: pdf_document
+---
+
+This document is for replicating Yi's code for our survival project, with the bladder1 dataset.
+
+#Load Bladder dataset
+
+```{r}
+library(survival)
+library(ltmle)
+library(ggplot2)
+library(mvtnorm)
+library(dplyr)
+library(purrr)
+library(rlang)
+
+data <- bladder1
+
+data <- data %>% 
+  dplyr::select(-c(rtumor,rsize,enum,recur))
+
+#next change status = 3 to 0
+#assume death is type of censoring
+# for now change status = 2 to 0 as well...
+data$status[data$status == 3 | data$status == 2] <- 0
+
+#redefine treatment to numeric
+#0 = placebo, 1 = pyridoxine, 2 = thiotepa
+data$treatment <- as.numeric(data$treatment) - 1
+
+#for now, only use the first recurrence for a patient
+data <- data %>% filter(start == 0) %>%
+  mutate(time = stop) %>%
+  dplyr::select(-c(start,stop,id))
+
+full_data <- data
+```
+
+Use this block of code ONLY if you are using the simulated data
+
+```{r}
+
+```
+
+```{r}
+#make 3 different datasets for 3 levels of comparison
+data01 <- data %>% filter(treatment %in% c(0,1))
+data02 <- data %>% filter(treatment %in% c(0,2))
+data12 <- data %>% filter(treatment %in% c(1,2))
+
+#data <- data01
+
+data <- data02
+data$treatment[data$treatment == 2] <- 1
+
+#data <- data12
+#data$treatment <- data$treatment - 1
+
+#time survival time in month, possibly censored.
+#status 0 censored, 1 recurrence, 2 death from bladder disease, 3 dead from other causes
+```
+
+Some facts about using ltmle:
+
+The estimates returned by ltmle are of a treatment specific mean, E[Ya], the mean of the final treatment node, where all treatment nodes, A, are set to a  and all censoring nodes C are set to 1 (uncensored).
+
+data should be a data frame where the order of the columns corresponds to the time-ordering of the model.
+
+*In censoring columns (Cnodes): factor with two levels: "censored" and "uncensored". Thehelper function BinaryToCensoring can be used to create these factors
+
+*In treatment columns (Anodes): 1 = treated, 0 = untreated (must be binary)
+
+*In event columns (Ynodes): If survivalOutcome is TRUE, then Y nodes are treated as indicators of a one-time event
+
+*time-dependent covariate columns (Lnodes): can be any numeric data
+
+*Data in Cnodes, Anodes, Lnodes and Ynodes are not used after (to the right of) censoring (or an event when survivalOutcome==TRUE) and may be coded as NA or any other value.
+
+*Columns in data that are before (to the left of) the first of Cnodes or Anodes are treated as baseline variables, even if they are specified as Lnodes.
+
+*After the first of Cnodes, Anodes, Ynodes, or Lnodes, every column must be in one of Cnodes, Anodes, Ynodes, or Lnodes.
+
+*If survivalOutcome is TRUE, all Y values are indicators of an event (e.g. death) at or before the current time, where 1 = event and 0 = no event. The events in Ynodes must be of the form where once Y jumps to 1, Y remains 1 at subsequent nodes.
+
+#Prepare our data for ltmle usage
+
+#Time scale
+```{r}
+#ltmle only handle discrete time
+#Before we continue our discretization, let's visualize the time collected in days.
+hist(data$time)
+```
+
+#Now, let's create a dataset that keeps track of the time-dependent status in each row. 
+
+```{r}
+#For each row in my original data, I know the event happen at the recorded time, no matter it is a censoring event or a failure event. This implies that before that time, the Cnodes are 0 (no censroing) and the Ynodes is 0 (not failed yet).
+
+#At each time point, the Cnode comes before Ynode. Since If not censored at that time, we can observe whether failure happened at that time or not.
+
+#Note that the time 0 treatment is already after the baseline nodes, so don't need to move it to the position after the baseline columns.
+
+max_time <- max(data$time)
+
+c_column_name <- paste0("C_", 0:max(data$time))
+y_column_name <- paste0("Y_", 0:max(data$time))
+
+for(i in 0:max(data$time)){
+  data <- data %>% 
+    mutate(!!c_column_name[i+1] := ifelse(time==i & status==1,1,ifelse(time<i,ifelse(status==0,0,NA),0)),
+           !!y_column_name[i+1] := ifelse(time<=i & status==0,1,ifelse(time<=i,NA,0)))
+  
+}
+
+data <- data %>% dplyr::select(-time,-status)
+
+#We will use the BinaryToCensoring function to help us changing the Cnodes to factor object to be used in ltmle
+for(j in 0:max_time){
+  data[,c_column_name[j+1]] <- BinaryToCensoring(is.censored=data[,c_column_name[j+1]])
+}
+```
+
+
+#Fit ltmle example
+
+```{r} 
+#Now, we need to tell the ltmle what are the A nodes, L nodes, C nodes and Y nodes
+time <- 24
+Anodes <- c("treatment") #can give by column name
+Lnodes<- c(2,3) #can give by column number
+Cnodes<- c_column_name[1:(time+1)]
+Ynodes<- y_column_name[1:(time+1)]
+
+
+library(SuperLearner)
+library(arm) #the SL.bayesglm needs this package
+#You can try to put more complicated superLearner libraries
+SL.library <- c("SL.glm", "SL.bayesglm", "SL.mean")
+
+tmp_dat <- data %>% dplyr::select(treatment,number,size,Cnodes,Ynodes)
+  
+results.ltmle <- ltmle(
+  data = tmp_dat,
+  survivalOutcome = TRUE,
+  Anodes = Anodes, Lnodes = Lnodes, Cnodes = Cnodes,  Ynodes = Ynodes,
+  abar = 1, #to specify the intervention of interest to 1
+  variance.method = "ic",
+  SL.library=SL.library
+)
+
+#This gives you the tmle estimate for the counterfactual P(T1<=time) in a world where treatment is set to 1 and there is no censoring.
+#Since this gives you the  E(Y_5) under no censoring and intervention 1. Due to Y_time=1 or 0, this is the same as P(Y_time=1), but Y_time=1 means T<=time.
+results.ltmle$estimates[1]
+#This gives you a vector of Influence curve evaluation for P(T1<=time) at each observation O_i, so that you can use it for simultaneous interval construction.
+
+results.ltmle$IC$tmle
+
+c(results.ltmle$estimates[1] - 1.96*(sd(results.ltmle$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle$estimates[1] + 1.96*(sd(results.ltmle$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+###
+#Now if one is interested in the 1-P(T1>time)
+#tmle estimate for 1-P(T1>time)
+1-results.ltmle$estimates[1]
+#IC(O_i) for 1-P(T1>time)
+
+#-results.ltmle$IC$tmle
+```
+
+
+#Fit ltmle for t = 24
+
+```{r} 
+#Now, we need to tell the ltmle what are the A nodes, L nodes, C nodes and Y nodes
+time <- 24
+Anodes <- c("treatment") #can give by column name
+Lnodes<- c(2,3) #can give by column number
+Cnodes<- c_column_name[1:(time+1)]
+Ynodes<- y_column_name[1:(time+1)]
+
+
+library(SuperLearner)
+library(arm) #the SL.bayesglm needs this package
+#You can try to put more complicated superLearner libraries
+SL.library <- c("SL.glm", "SL.bayesglm", "SL.mean")
+
+tmp_dat <- data %>% dplyr::select(treatment,number,size,Cnodes,Ynodes)
+  
+results.ltmle.24 <- ltmle(
+  data = tmp_dat,
+  survivalOutcome = TRUE,
+  Anodes = Anodes, Lnodes = Lnodes, Cnodes = Cnodes,  Ynodes = Ynodes,
+  abar = 1, #to specify the intervention of interest to 1
+  variance.method = "ic",
+  SL.library=SL.library
+)
+
+#This gives you the tmle estimate for the counterfactual P(T1<=time) in a world where treatment is set to 1 and there is no censoring.
+#Since this gives you the  E(Y_5) under no censoring and intervention 1. Due to Y_time=1 or 0, this is the same as P(Y_time=1), but Y_time=1 means T<=time.
+results.ltmle.24$estimates[1]
+#This gives you a vector of Influence curve evaluation for P(T1<=time) at each observation O_i, so that you can use it for simultaneous interval construction.
+
+results.ltmle.24$IC$tmle
+
+c(results.ltmle.24$estimates[1] - 1.96*(sd(results.ltmle.36$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle.24$estimates[1] + 1.96*(sd(results.ltmle.36$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+###
+#Now if one is interested in the 1-P(T1>time)
+#tmle estimate for 1-P(T1>time)
+1-results.ltmle.24$estimates[1]
+#IC(O_i) for 1-P(T1>time)
+
+#-results.ltmle$IC$tmle
+```
+
+
+
+#Fit ltmle for t = 36
+
+```{r} 
+#Now, we need to tell the ltmle what are the A nodes, L nodes, C nodes and Y nodes
+time <- 36
+Anodes <- c("treatment") #can give by column name
+Lnodes<- c(2,3) #can give by column number
+Cnodes<- c_column_name[1:(time+1)]
+Ynodes<- y_column_name[1:(time+1)]
+
+
+library(SuperLearner)
+library(arm) #the SL.bayesglm needs this package
+#You can try to put more complicated superLearner libraries
+SL.library <- c("SL.glm", "SL.bayesglm", "SL.mean")
+
+tmp_dat <- data %>% dplyr::select(treatment,number,size,Cnodes,Ynodes)
+  
+results.ltmle.36 <- ltmle(
+  data = tmp_dat,
+  survivalOutcome = TRUE,
+  Anodes = Anodes, Lnodes = Lnodes, Cnodes = Cnodes,  Ynodes = Ynodes,
+  abar = 1, #to specify the intervention of interest to 1
+  variance.method = "ic",
+  SL.library=SL.library
+)
+
+#This gives you the tmle estimate for the counterfactual P(T1<=time) in a world where treatment is set to 1 and there is no censoring.
+#Since this gives you the  E(Y_5) under no censoring and intervention 1. Due to Y_time=1 or 0, this is the same as P(Y_time=1), but Y_time=1 means T<=time.
+results.ltmle.36$estimates[1]
+#This gives you a vector of Influence curve evaluation for P(T1<=time) at each observation O_i, so that you can use it for simultaneous interval construction.
+
+results.ltmle.36$IC$tmle
+
+c(results.ltmle.36$estimates[1] - 1.96*(sd(results.ltmle.36$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle.36$estimates[1] + 1.96*(sd(results.ltmle.36$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+###
+#Now if one is interested in the 1-P(T1>time)
+#tmle estimate for 1-P(T1>time)
+1-results.ltmle.36$estimates[1]
+#IC(O_i) for 1-P(T1>time)
+
+#-results.ltmle$IC$tmle
+```
+
+
+#Fit ltmle for t = 48
+
+```{r} 
+#Now, we need to tell the ltmle what are the A nodes, L nodes, C nodes and Y nodes
+time <- 48
+Anodes <- c("treatment") #can give by column name
+Lnodes<- c(2,3) #can give by column number
+Cnodes<- c_column_name[1:(time+1)]
+Ynodes<- y_column_name[1:(time+1)]
+
+
+library(SuperLearner)
+library(arm) #the SL.bayesglm needs this package
+#You can try to put more complicated superLearner libraries
+SL.library <- c("SL.glm", "SL.bayesglm", "SL.mean")
+
+tmp_dat <- data %>% dplyr::select(treatment,number,size,Cnodes,Ynodes)
+  
+results.ltmle.48 <- ltmle(
+  data = tmp_dat,
+  survivalOutcome = TRUE,
+  Anodes = Anodes, Lnodes = Lnodes, Cnodes = Cnodes,  Ynodes = Ynodes,
+  abar = 1, #to specify the intervention of interest to 1
+  variance.method = "ic",
+  SL.library=SL.library
+)
+
+#This gives you the tmle estimate for the counterfactual P(T1<=time) in a world where treatment is set to 1 and there is no censoring.
+#Since this gives you the  E(Y_5) under no censoring and intervention 1. Due to Y_time=1 or 0, this is the same as P(Y_time=1), but Y_time=1 means T<=time.
+results.ltmle.48$estimates[1]
+#This gives you a vector of Influence curve evaluation for P(T1<=time) at each observation O_i, so that you can use it for simultaneous interval construction.
+
+results.ltmle.48$IC$tmle
+
+c(results.ltmle.48$estimates[1] - 1.96*(sd(results.ltmle.48$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle.48$estimates[1] + 1.96*(sd(results.ltmle.48$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+###
+#Now if one is interested in the 1-P(T1>time)
+#tmle estimate for 1-P(T1>time)
+1-results.ltmle.48$estimates[1]
+#IC(O_i) for 1-P(T1>time)
+
+#-results.ltmle$IC$tmle
+```
+
+
+
+
+#Now one has everything for mutliple time points, then one can go over the Simultaneous_CI.Rmd files row 141-182 to construct simultaneous CI.
+
+
+
+```{r}
+
+n <- length(results.ltmle.24$IC$tmle)
+IC_matrix <- cbind(results.ltmle.24$IC$tmle, results.ltmle.36$IC$tmle, results.ltmle.48$IC$tmle)
+#STEP2 start
+# compute the correlation of the IC matrix
+Sigma <- cor(IC_matrix)
+# randomly draw from a multivariate Normal(0,Sigma) distribution
+mean <- rep(0, length(times))
+z <- rmvnorm(1e6, mean, Sigma)
+    
+# identify row-wise maximum of the absolute value of each MVN value in z
+z_abs <- apply(z, 1, function(x) max(abs(x))) 
+# identify 95th quantile of z_abs, which is the se to use for simultaneous CI
+z_95 <- quantile(z_abs, .95)
+# note how the se_simultaneous is larger when demanding simultaneous coverage
+# of the truth, and it directly follows that simultaneous CIs are wider.
+    
+# check if all of the simultaneous CI's covered the truth
+sd_IC.24 <- sd(IC_matrix[,1])/sqrt(n)
+sd_IC.36 <- sd(IC_matrix[,2])/sqrt(n)
+sd_IC.48 <- sd(IC_matrix[,3])/sqrt(n)
+
+ltmle.est.24 <- results.ltmle.24$estimates[1] 
+ltmle.est.36 <- results.ltmle.36$estimates[1] 
+ltmle.est.48 <- results.ltmle.48$estimates[1]    
+
+ci.24 <- c(ltmle.est.24-z_95*sd_IC.24, ltmle.est.24+z_95*sd_IC.24)
+    
+ci.36 <- c(ltmle.est.36-z_95*sd_IC.36, ltmle.est.36+z_95*sd_IC.36)
+    
+ci.48 <- c(ltmle.est.48-z_95*sd_IC.48, ltmle.est.48+z_95*sd_IC.48)
+    
+ci.24
+ci.36
+ci.48
+
+ltmle.est.24
+ltmle.est.36
+ltmle.est.48
+
+ci.pt.24 <- c(results.ltmle.24$estimates[1] - 1.96*(sd(results.ltmle.24$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle.24$estimates[1] + 1.96*(sd(results.ltmle.24$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+ci.pt.36 <- c(results.ltmle.36$estimates[1] - 1.96*(sd(results.ltmle.36$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle.36$estimates[1] + 1.96*(sd(results.ltmle.36$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+ci.pt.48 <- c(results.ltmle.48$estimates[1] - 1.96*(sd(results.ltmle.48$IC$tmle))/sqrt(nrow(tmp_dat)),
+  results.ltmle.48$estimates[1] + 1.96*(sd(results.ltmle.48$IC$tmle))/sqrt(nrow(tmp_dat)))
+
+ci.pt.24
+ci.pt.36
+ci.pt.48
+
+```
+
