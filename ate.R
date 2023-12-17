@@ -8,7 +8,7 @@ library(ltmle)
 
 
 data <- bladder1
-tau=24
+tau=48
 data <- data %>% filter(enum == 1) %>%
   dplyr::select(-c(start,rtumor,rsize,enum,recur))
 
@@ -20,7 +20,7 @@ data$status[data$status == 3] <- 0
 data$Y <- ifelse(data$stop <= tau & data$status==1, 1, 0)
 
 #Censoring variable: I(C>tau)
-data$censoring<-ifelse(data$stop>tau & data$status==0, 1,0)
+data$censoring<-ifelse(data$stop<=tau & data$status==0, 1,0)
 data$delta=1-data$censoring
 #redefine treatment to numeric
 #0 = placebo, 1 = pyridoxine, 2 = thiotepa
@@ -32,8 +32,8 @@ data <- data %>% dplyr::select(-stop)
 #binarize baseline covariates
 #so that we have sufficient support in W
 #no positivity violations
-data$size <- ifelse(data$size > 1, 1, 0)
-data$number <- ifelse(data$number > 1, 1, 0)
+#data$size <- ifelse(data$size > 1, 1, 0)
+#data$number <- ifelse(data$number > 1, 1, 0)
 
 #make 3 different datasets for 3 levels of comparison
 data01 <- data %>% filter(treatment %in% c(0,1))
